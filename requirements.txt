@@ -1,0 +1,3 @@
+PyQt6==6.6.1
+SQLAlchemy>=2.0.25
+reportlab==4.0.7
