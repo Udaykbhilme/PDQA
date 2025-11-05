@@ -1,12 +1,12 @@
 """
 Database models for Timetable Generator
-Defines ORM mappings for Faculty, Subject, Venue, Section, and related entities.
+Defines ORM mappings for Faculty, Subject, Venue, Section, and simple containers.
 """
 
 from sqlalchemy import (
-    Column, Integer, String, Boolean, ForeignKey, JSON
+    Column, Integer, String, Boolean, JSON
 )
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
 
@@ -30,12 +30,12 @@ class Subject(Base):
     code = Column(String, nullable=False)
     name = Column(String, nullable=False)
     is_lab = Column(Boolean, default=False)
-    duration = Column(Integer, default=1)
+    duration = Column(Integer, default=1)  # default hours per session (lectures usually 1)
     year = Column(Integer, default=1)
     semester = Column(Integer, default=1)
     degree = Column(String, default="B.Tech")
 
-    # NEW: list of faculty IDs who are allowed to teach this subject
+    # Optional: list of faculty IDs allowed to teach this subject (JSON array)
     preferred_faculty_ids = Column(JSON, default=list)
 
     def __repr__(self):
@@ -72,11 +72,18 @@ class Section(Base):
 
 
 class ClassAssignment:
-    """Simple struct-like container for generated timetable data."""
-
+    """
+    In-memory container used by the scheduler.
+    - For lectures: `.faculty` is the Faculty object assigned.
+    - For labs: `.faculties` is a list of Faculty objects (length 1 or 2).
+    """
     def __init__(self, subject_id, faculty_id, section_id, venue_id, subsection, day, start_time, duration):
         self.subject_id = subject_id
+        # keep single primary faculty for backward compatibility
         self.faculty_id = faculty_id
+        self.faculty = None             # Faculty object (primary)
+        self.faculty_ids = [faculty_id] # list of faculty ids (primary [+ secondary])
+        self.faculties = []             # list of Faculty objects (primary [+ secondary])
         self.section_id = section_id
         self.venue_id = venue_id
         self.subsection = subsection
@@ -84,11 +91,13 @@ class ClassAssignment:
         self.start_time = start_time
         self.duration = duration
 
-        # Populated later
+        # Populated later:
         self.subject = None
-        self.faculty = None
         self.section = None
         self.venue = None
+
+    def __repr__(self):
+        return f"<Assignment {getattr(self.subject,'code',self.subject_id)} {self.day} {self.start_time}>"
 
 
 class Conflict:

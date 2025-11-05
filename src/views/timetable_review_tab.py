@@ -1,22 +1,24 @@
+"""
+Timetable Review Tab (Supercharged Edition)
+
+This tab allows full review and manual editing of generated timetables.
+
+✅ Edit any cell directly — subject, faculty, venue, subgroup, or time.
+✅ Allocate new classes in empty cells.
+✅ Displays both faculties for labs (if assigned).
+✅ Prevents edits or allocations during lunch hour.
+"""
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
-    QPushButton, QLabel, QMessageBox, QInputDialog
+    QPushButton, QLabel, QComboBox, QDialog, QDialogButtonBox,
+    QGridLayout, QMessageBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QBrush, QFont
 
 
 class TimetableReviewTab(QWidget):
-    """
-    Supercharged Timetable Review Tab
-    --------------------------------
-    - Directly editable timetable grid
-    - Allows creating new allocations in empty slots
-    - Change subject, faculty, venue, subgroup, and time slot
-    - No notes area, just pure control
-    - Emits timetable_updated signal on approval
-    """
-
     timetable_updated = pyqtSignal(list, dict)
 
     def __init__(self, db_manager):
@@ -25,32 +27,29 @@ class TimetableReviewTab(QWidget):
         self.assignments = []
         self.meta = {}
         self.conflicts = []
-        self.faculties = []
-        self.subjects = []
-        self.venues = []
         self._ui()
 
+    # ------------------ UI SETUP ------------------ #
     def _ui(self):
         layout = QVBoxLayout(self)
-
-        # Header info
         self.info = QLabel("No timetable loaded")
         self.info.setStyleSheet("font: 600 14px 'Segoe UI'; color: #fff;")
         layout.addWidget(self.info)
 
-        # Editable Table
+        # Timetable Grid
         self.table = QTableWidget()
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.cellDoubleClicked.connect(self._on_cell_double_click)
         self.table.setStyleSheet("""
             QTableWidget { background:#111; color:#ddd; gridline-color:#333; }
             QHeaderView::section { background:#1c1c1c; color:#aaa; font-weight:bold; }
         """)
-        self.table.cellDoubleClicked.connect(self._edit_or_allocate_cell)
         layout.addWidget(self.table)
 
         # Buttons
         btns = QHBoxLayout()
-        self.approve = self._btn("Approve Changes", "#2E8B57", self._approve)
-        self.regen = self._btn("Discard & Regenerate", "#007ACC", self._regen)
+        self.approve = self._btn("Approve", "#2E8B57", self._approve)
+        self.regen = self._btn("Regenerate", "#007ACC", self._regen)
         btns.addWidget(self.approve)
         btns.addWidget(self.regen)
         layout.addLayout(btns)
@@ -58,8 +57,10 @@ class TimetableReviewTab(QWidget):
     def _btn(self, text, color, fn):
         b = QPushButton(text)
         b.setStyleSheet(f"""
-            QPushButton {{ background:{color}; color:white; border:none; 
-                           padding:6px 12px; border-radius:4px; font-weight:bold; }}
+            QPushButton {{
+                background:{color}; color:white; border:none;
+                padding:6px 12px; border-radius:4px; font-weight:bold;
+            }}
             QPushButton:hover {{ background:#3399FF; }}
             QPushButton:disabled {{ background:#444; color:#777; }}
         """)
@@ -67,15 +68,9 @@ class TimetableReviewTab(QWidget):
         b.setEnabled(False)
         return b
 
-    # ---------- CORE ----------
+    # ------------------ TABLE RENDERING ------------------ #
     def set_timetable(self, assignments, info, conflicts):
         self.assignments, self.meta, self.conflicts = assignments, info, conflicts
-
-        # Fetch DB data for options
-        self.faculties = self.db.get_faculties()
-        self.subjects = self.db.get_subjects()
-        self.venues = self.db.get_venues()
-
         self._render()
         self.approve.setEnabled(True)
         self.regen.setEnabled(True)
@@ -95,195 +90,240 @@ class TimetableReviewTab(QWidget):
             return
 
         days = self.meta.get("days", ["Mon", "Tue", "Wed", "Thu", "Fri"])
-        slots = self._slots(self.meta)
-        self.info.setText(f"{self.meta.get('degree','B.Tech')} {self.meta.get('year','')} Sem {self.meta.get('semester','')}")
+        start = self._to_min(self.meta.get("start_time", "09:00"))
+        end = self._to_min(self.meta.get("end_time", "17:00"))
+        lunch_start = self._to_min(self.meta.get("lunch_start", "13:00"))
+        lunch_end = self._to_min(self.meta.get("lunch_end", "14:00"))
+
+        # build hourly slots skipping nothing visually (we show lunch as gray)
+        slots = [{"start": self._fmt(t), "end": self._fmt(t + 60)} for t in range(start, end, 60)]
+
+        header = f"{self.meta.get('degree','B.Tech')} Year {self.meta.get('year','')} Sem {self.meta.get('semester','')}"
+        self.info.setText(header)
+
         self.table.setRowCount(len(slots))
         self.table.setColumnCount(len(days) + 1)
         self.table.setHorizontalHeaderLabels(["Time"] + days)
 
         for r, s in enumerate(slots):
-            time_item = QTableWidgetItem(f"{s['start']}\n{s['end']}")
-            time_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            time_item.setForeground(QColor("#999"))
-            self.table.setItem(r, 0, time_item)
+            # Time label
+            t = QTableWidgetItem(f"{s['start']}\n{s['end']}")
+            t.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            t.setForeground(QColor("#999"))
+            self.table.setItem(r, 0, t)
 
+            # Day cells
             for c, d in enumerate(days):
-                txt = self._cell_text(d, s["start"])
-                item = QTableWidgetItem(txt)
-                if txt:
-                    color = QColor(35, 70, 110) if not self._islab(d, s["start"]) else QColor(30, 90, 50)
-                    item.setBackground(color)
-                    item.setForeground(QColor("#fff"))
-                else:
-                    item.setBackground(QColor(25, 25, 25))
-                    item.setForeground(QColor("#666"))
-                    item.setText("Empty Slot")
-                self.table.setItem(r, c + 1, item)
+                start_m = self._to_min(s["start"])
+                cell_item = QTableWidgetItem()
 
-            self.table.setRowHeight(r, 75)
+                # Check if lunch time
+                if lunch_start <= start_m < lunch_end:
+                    cell_item.setBackground(QColor(40, 40, 40))
+                    cell_item.setText("Lunch Break")
+                    cell_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                    cell_item.setForeground(QBrush(QColor("#888")))
+                    self.table.setItem(r, c + 1, cell_item)
+                    continue
 
-    def _slots(self, m):
-        s, e = self._min(m.get("start_time", "09:00")), self._min(m.get("end_time", "18:00"))
-        l1, l2 = self._min(m.get("lunch_start", "13:00")), self._min(m.get("lunch_end", "14:00"))
-        return [{"start": self._time(t), "end": self._time(t + 60)} for t in range(s, e, 60) if not l1 <= t < l2]
+                # Otherwise fill with class data
+                txt, color = self._cell_text_and_color(d, s["start"])
+                cell_item.setText(txt)
+                cell_item.setBackground(color)
+                self.table.setItem(r, c + 1, cell_item)
+                self.table.setRowHeight(r, 80)
 
-    def _cell_text(self, day, start):
-        a = next((x for x in self.assignments if x.day == day and x.start_time == start), None)
+    def _cell_text_and_color(self, day, start_time):
+        """Return cell text and color based on assignments."""
+        a = next((x for x in self.assignments if x.day == day and x.start_time == start_time), None)
         if not a:
-            return ""
-        s, f, v = getattr(a, "subject", None), getattr(a, "faculty", None), getattr(a, "venue", None)
-        subgroup = getattr(a, "subsection", "")
-        if not all([s, f, v]):
-            return "Incomplete"
-        sub_str = f" ({subgroup})" if subgroup else ""
-        return f"{s.code}{sub_str}\n{s.name}\n{f.name}\n{v.name}"
+            return "", QColor(20, 20, 20)
 
-    def _islab(self, d, s):
-        a = next((x for x in self.assignments if x.day == d and x.start_time == s), None)
-        return bool(a and getattr(a.subject, "is_lab", False))
+        s = a.subject
+        v = a.venue
+        # For labs, show both faculties
+        if getattr(a, "faculties", None) and len(a.faculties) > 1:
+            faculty_names = ", ".join(f.name for f in a.faculties)
+        else:
+            faculty_names = a.faculty.name if a.faculty else "N/A"
 
-    def _min(self, t):
-        h, m = map(int, t.split(":"))
-        return h * 60 + m
+        text = f"{s.code}\n{s.name}\n{faculty_names}\n{v.name}"
+        color = QColor(30, 90, 50) if s.is_lab else QColor(35, 70, 110)
+        return text, color
 
-    def _time(self, m):
-        return f"{m // 60:02d}:{m % 60:02d}"
-
-    # ---------- EDITING / ALLOCATING ----------
-    def _edit_or_allocate_cell(self, row, col):
-        """Handle cell double-click for both edit and new allocation."""
+    # ------------------ EDITING ------------------ #
+    def _on_cell_double_click(self, row, col):
+        """Double-click handler: edit or allocate new class."""
         if col == 0:
-            return
+            return  # Time column
 
-        time_item = self.table.item(row, 0)
-        if not time_item:
-            return
-
-        start_time = time_item.text().split("\n")[0]
         day = self.table.horizontalHeaderItem(col).text()
+        start_time = self.table.item(row, 0).text().split("\n")[0]
+        cell_item = self.table.item(row, col)
 
-        # Check if there's an existing assignment
-        assignment = next((x for x in self.assignments if x.day == day and x.start_time == start_time), None)
-
-        if not assignment:
-            # Empty slot -> allocate new class
-            self._allocate_new_class(day, start_time)
+        if not cell_item:
             return
 
-        # Edit existing allocation
-        self._edit_existing_class(assignment)
-        self._render()
-
-    def _allocate_new_class(self, day, start_time):
-        """Create new class allocation in empty slot."""
-        sub_choice, ok = QInputDialog.getItem(
-            self, "Allocate Subject", "Select Subject:",
-            [f"{s.code} - {s.name}" for s in self.subjects], 0, False
-        )
-        if not ok or not sub_choice:
-            return
-        sub_code = sub_choice.split(" - ")[0]
-        subject = next((s for s in self.subjects if s.code == sub_code), None)
-
-        fac_choice, ok = QInputDialog.getItem(
-            self, "Allocate Faculty", "Select Faculty:",
-            [f.name for f in self.faculties], 0, False
-        )
-        if not ok or not fac_choice:
-            return
-        faculty = next((f for f in self.faculties if f.name == fac_choice), None)
-
-        ven_choice, ok = QInputDialog.getItem(
-            self, "Allocate Venue", "Select Venue:",
-            [v.name for v in self.venues], 0, False
-        )
-        if not ok or not ven_choice:
-            return
-        venue = next((v for v in self.venues if v.name == ven_choice), None)
-
-        subgroup, ok = QInputDialog.getText(self, "Subgroup (optional)", "Enter Subgroup (A1, B2, etc.):")
-        if not ok:
-            subgroup = ""
-
-        # Build a new assignment object (simple structure, same as scheduler output)
-        new_assignment = type("Assignment", (), {})()
-        new_assignment.day = day
-        new_assignment.start_time = start_time
-        new_assignment.subject = subject
-        new_assignment.faculty = faculty
-        new_assignment.venue = venue
-        new_assignment.subsection = subgroup.strip() if subgroup else ""
-
-        self.assignments.append(new_assignment)
-        self._render()
-        QMessageBox.information(self, "Success", "Class allocated successfully.")
-
-    def _edit_existing_class(self, a):
-        """Edit an existing class allocation."""
-        edit_type, ok = QInputDialog.getItem(
-            self, "Edit Timetable", "Choose what to edit:",
-            ["Subject", "Faculty", "Venue", "Subgroup", "Time Slot"], 0, False
-        )
-        if not ok:
+        if "Lunch" in cell_item.text():
+            QMessageBox.information(self, "Lunch Hour", "Cannot allocate during lunch break.")
             return
 
-        if edit_type == "Subject":
-            sub_choice, ok = QInputDialog.getItem(
-                self, "Change Subject", "Select new subject:",
-                [f"{s.code} - {s.name}" for s in self.subjects], 0, False
-            )
-            if ok and sub_choice:
-                sub_code = sub_choice.split(" - ")[0]
-                new_sub = next((s for s in self.subjects if s.code == sub_code), None)
-                if new_sub:
-                    a.subject = new_sub
+        existing = next((x for x in self.assignments if x.day == day and x.start_time == start_time), None)
+        dialog = EditClassDialog(self.db, existing, day, start_time)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            result = dialog.get_result()
+            if existing:
+                # Update existing assignment
+                existing.subject = result["subject"]
+                existing.faculty = result["faculty"]
+                existing.faculties = result["faculties"]
+                existing.venue = result["venue"]
+                existing.subsection = result["subsection"]
+            else:
+                # Create new one
+                from ..database.db_models import ClassAssignment
+                new_a = ClassAssignment(
+                    result["subject"].id,
+                    result["faculty"].id,
+                    result["section"].id if result.get("section") else 1,
+                    result["venue"].id,
+                    result["subsection"],
+                    day,
+                    start_time,
+                    result["subject"].duration
+                )
+                new_a.subject = result["subject"]
+                new_a.faculty = result["faculty"]
+                new_a.faculties = result["faculties"]
+                new_a.venue = result["venue"]
+                self.assignments.append(new_a)
 
-        elif edit_type == "Faculty":
-            fac_choice, ok = QInputDialog.getItem(
-                self, "Change Faculty", "Select new faculty:",
-                [f.name for f in self.faculties], 0, False
-            )
-            if ok and fac_choice:
-                new_fac = next((f for f in self.faculties if f.name == fac_choice), None)
-                if new_fac:
-                    a.faculty = new_fac
+            self._render()  # refresh display
 
-        elif edit_type == "Venue":
-            ven_choice, ok = QInputDialog.getItem(
-                self, "Change Venue", "Select new venue:",
-                [v.name for v in self.venues], 0, False
-            )
-            if ok and ven_choice:
-                new_v = next((v for v in self.venues if v.name == ven_choice), None)
-                if new_v:
-                    a.venue = new_v
-
-        elif edit_type == "Subgroup":
-            sub, ok = QInputDialog.getText(self, "Change Subgroup", "Enter new subgroup:")
-            if ok and sub.strip():
-                a.subsection = sub.strip()
-
-        elif edit_type == "Time Slot":
-            new_time, ok = QInputDialog.getText(self, "Change Time", "Enter new start time (HH:MM):", text=a.start_time)
-            if ok and new_time.strip():
-                a.start_time = new_time.strip()
-
-    # ---------- CONTROLS ----------
+    # ------------------ APPROVE/REGENERATE ------------------ #
     def _approve(self):
         if not self.assignments:
             QMessageBox.warning(self, "Warning", "No timetable to approve.")
             return
-        if QMessageBox.question(
-            self, "Confirm", "Approve and save all timetable changes?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        ) == QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, "Confirm", "Approve timetable?",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             self.meta["status"] = "approved"
             self.timetable_updated.emit(self.assignments, self.meta)
-            QMessageBox.information(self, "Approved", "All timetable edits and allocations have been saved.")
+            QMessageBox.information(self, "Approved", "Timetable approved.")
 
     def _regen(self):
-        if QMessageBox.question(
-            self, "Regenerate", "Discard current timetable and regenerate?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        ) == QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, "Regenerate", "Discard current timetable?",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             self.clear()
+
+    # ------------------ HELPERS ------------------ #
+    def _to_min(self, t):
+        h, m = map(int, t.split(":"))
+        return h * 60 + m
+
+    def _fmt(self, m):
+        return f"{m//60:02d}:{m%60:02d}"
+
+
+# ------------------ EDIT DIALOG ------------------ #
+class EditClassDialog(QDialog):
+    """Dialog to edit or create a class manually."""
+
+    def __init__(self, db, existing, day, start_time):
+        super().__init__()
+        self.setWindowTitle("Edit Class")
+        self.db = db
+        self.existing = existing
+        self.day = day
+        self.start_time = start_time
+        self.result_data = {}
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QGridLayout(self)
+        row = 0
+
+        layout.addWidget(QLabel(f"Day: {self.day}  |  Start: {self.start_time}"), row, 0, 1, 2)
+        row += 1
+
+        layout.addWidget(QLabel("Subject:"), row, 0)
+        self.subject_box = QComboBox()
+        for s in self.db.get_subjects():
+            self.subject_box.addItem(f"{s.code} - {s.name}", s)
+        layout.addWidget(self.subject_box, row, 1)
+        row += 1
+
+        layout.addWidget(QLabel("Faculty (1):"), row, 0)
+        self.faculty_box1 = QComboBox()
+        for f in self.db.get_faculties():
+            self.faculty_box1.addItem(f.name, f)
+        layout.addWidget(self.faculty_box1, row, 1)
+        row += 1
+
+        layout.addWidget(QLabel("Faculty (2):"), row, 0)
+        self.faculty_box2 = QComboBox()
+        self.faculty_box2.addItem("None", None)
+        for f in self.db.get_faculties():
+            self.faculty_box2.addItem(f.name, f)
+        layout.addWidget(self.faculty_box2, row, 1)
+        row += 1
+
+        layout.addWidget(QLabel("Venue:"), row, 0)
+        self.venue_box = QComboBox()
+        for v in self.db.get_venues():
+            self.venue_box.addItem(v.name, v)
+        layout.addWidget(self.venue_box, row, 1)
+        row += 1
+
+        layout.addWidget(QLabel("Subgroup:"), row, 0)
+        self.sub_box = QComboBox()
+        self.sub_box.addItems(["", "A1", "A2", "A3", "B1", "B2", "B3"])
+        layout.addWidget(self.sub_box, row, 1)
+        row += 1
+
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons, row, 0, 1, 2)
+
+        if self.existing:
+            self._load_existing()
+
+    def _load_existing(self):
+        """Preload existing values into combo boxes."""
+        s = self.existing.subject
+        f = self.existing.faculty
+        v = self.existing.venue
+        self._set_combo(self.subject_box, s.name)
+        self._set_combo(self.faculty_box1, f.name if f else None)
+        self._set_combo(self.venue_box, v.name if v else None)
+        if getattr(self.existing, "faculties", None) and len(self.existing.faculties) > 1:
+            self._set_combo(self.faculty_box2, self.existing.faculties[1].name)
+
+        if self.existing.subsection:
+            self._set_combo(self.sub_box, self.existing.subsection)
+
+    def _set_combo(self, combo, name):
+        if not name:
+            return
+        idx = combo.findText(name)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def get_result(self):
+        """Return dictionary of selected values."""
+        subject = self.subject_box.currentData()
+        faculty1 = self.faculty_box1.currentData()
+        faculty2 = self.faculty_box2.currentData()
+        venue = self.venue_box.currentData()
+        subgroup = self.sub_box.currentText()
+        faculties = [f for f in [faculty1, faculty2] if f]
+
+        return {
+            "subject": subject,
+            "faculty": faculty1,
+            "faculties": faculties,
+            "venue": venue,
+            "subsection": subgroup,
+        }
