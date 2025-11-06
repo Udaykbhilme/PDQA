@@ -227,3 +227,75 @@ class DatabaseManager:
                 return False
         except SQLAlchemyError:
             return False
+
+    # ---------------------------------------------------------------------
+    # UPDATE (NEWLY ADDED)
+    # ---------------------------------------------------------------------
+    def update_faculty(self, faculty_id, name, code, max_hours):
+        """Update faculty details."""
+        try:
+            with self.get_session() as session:
+                fac = session.get(Faculty, faculty_id)
+                if fac:
+                    fac.name = name
+                    fac.faculty_code = code
+                    fac.max_hours_per_day = max_hours
+                    session.commit()
+                    return True
+                return False
+        except SQLAlchemyError:
+            return False
+
+    def update_subject(self, subject_id, code, name, is_lab, duration, semester, year, degree):
+        """Update subject details."""
+        try:
+            with self.get_session() as session:
+                sub = session.get(Subject, subject_id)
+                if sub:
+                    sub.code = code
+                    sub.name = name
+                    sub.is_lab = is_lab
+                    sub.duration = duration
+                    sub.semester = semester
+                    sub.year = year
+                    sub.degree = degree
+                    session.commit()
+                    return True
+                return False
+        except SQLAlchemyError:
+            return False
+
+    def update_venue(self, venue_id, name, vtype, capacity, building, floor):
+        """Update venue details."""
+        try:
+            with self.get_session() as session:
+                v = session.get(Venue, venue_id)
+                if v:
+                    v.name = name
+                    v.venue_type = vtype
+                    v.capacity = capacity
+                    v.building = building
+                    v.floor = floor
+                    session.commit()
+                    return True
+                return False
+        except SQLAlchemyError:
+            return False
+
+    def update_section(self, section_id, name, semester, year, degree, subsections, strength):
+        """Update section details."""
+        try:
+            with self.get_session() as session:
+                s = session.get(Section, section_id)
+                if s:
+                    s.name = name
+                    s.semester = semester
+                    s.year = year
+                    s.degree = degree
+                    s.subsections = subsections
+                    s.strength = strength
+                    session.commit()
+                    return True
+                return False
+        except SQLAlchemyError:
+            return False

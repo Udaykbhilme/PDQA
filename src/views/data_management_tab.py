@@ -4,287 +4,273 @@ from PyQt6.QtWidgets import (
     QSpinBox, QMessageBox, QHeaderView
 )
 from PyQt6.QtCore import Qt
-
-# import models
 from ..database.db_models import Faculty, Subject, Venue, Section
 
 
-# -----------------------------------------------------
-# GENERIC REUSABLE ENTITY TAB FOR CRUD OPERATIONS
-# -----------------------------------------------------
+# -------------------------
+# Generic Entity Tab
+# -------------------------
 class EntityTab(QWidget):
-    """Reusable tab component for managing any entity table (Faculty, Subject, etc.)"""
-    
-    def __init__(self, parent, name, columns, dialog_cls, db_getter, db_adder, db_deleter):
-        """
-        name: Tab name (string)
-        columns: List of column headers
-        dialog_cls: Dialog class for add/edit operations
-        db_getter: Method reference to fetch all entities
-        db_adder: Method reference to add entity
-        db_deleter: Method reference to delete entity
-        """
+    """Reusable CRUD Tab for Faculty, Subject, Venue, Section"""
+
+    def __init__(self, parent, name, columns, dialog_cls, getter, adder, updater, deleter, field_map=None):
         super().__init__(parent)
-        self.parent = parent
         self.name = name
         self.columns = columns
         self.dialog_cls = dialog_cls
-        self.db_getter = db_getter
-        self.db_adder = db_adder
-        self.db_deleter = db_deleter
-        self.init_ui()
+        self.get, self.add, self.update, self.delete = getter, adder, updater, deleter
+        self.field_map = field_map or {}
+        self._ui()
         self.load_data()
-    
-    def init_ui(self):
-        """Create the table and buttons"""
-        layout = QVBoxLayout(self)
 
-        # Table setup
+    def _ui(self):
+        layout = QVBoxLayout(self)
         self.table = QTableWidget()
         self.table.setColumnCount(len(self.columns))
         self.table.setHorizontalHeaderLabels(self.columns)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
 
-        # Buttons setup
+        # Buttons
         btn_layout = QHBoxLayout()
-        for text, handler in [
-            (f"Add {self.name}", self.add_entry),
-            (f"Edit {self.name}", self.edit_entry),
-            (f"Delete {self.name}", self.delete_entry)
-        ]:
-            btn = QPushButton(text)
-            btn.clicked.connect(handler)
-            btn_layout.addWidget(btn)
-
+        for text, func in [(f"Add {self.name}", self._on_add),
+                           (f"Edit {self.name}", self._on_edit),
+                           (f"Delete {self.name}", self._on_delete)]:
+            b = QPushButton(text)
+            b.clicked.connect(func)
+            btn_layout.addWidget(b)
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
     def load_data(self):
-        """Fetch and populate table data from DB"""
-        data = self.db_getter()
+        data = self.get()
         self.table.setRowCount(len(data))
-        for row, record in enumerate(data):
-            for col, attr in enumerate(self.columns):
-                val = getattr(record, attr.lower().replace(" ", "_"), "N/A")
-                self.table.setItem(row, col, QTableWidgetItem(str(val)))
+        for r, obj in enumerate(data):
+            for c, header in enumerate(self.columns):
+                attr = self.field_map.get(header, header.lower().replace(" ", "_"))
+                val = getattr(obj, attr, "N/A")
+                if attr == "is_lab":
+                    val = "Lab" if getattr(obj, "is_lab", False) else "Lecture"
+                self.table.setItem(r, c, QTableWidgetItem(str(val)))
 
-    def _selected_row_id(self):
-        """Return selected row's entity ID"""
-        row = self.table.currentRow()
-        if row < 0:
-            QMessageBox.warning(self, "Warning", f"Select a {self.name} to continue.")
+    def _selected_id(self):
+        r = self.table.currentRow()
+        if r < 0:
+            QMessageBox.warning(self, "Select", f"Select a {self.name} first.")
             return None
-        return int(self.table.item(row, 0).text())
+        try:
+            return int(self.table.item(r, 0).text())
+        except Exception:
+            QMessageBox.warning(self, "Error", "Invalid row selection.")
+            return None
 
-    def add_entry(self):
-        """Handle 'Add'"""
-        dlg = self.dialog_cls(self.parent)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
+    def _find_instance(self, _id):
+        return next((x for x in self.get() if getattr(x, "id", None) == _id), None)
+
+    def _on_add(self):
+        dlg = self.dialog_cls(self, title=f"Add {self.name}", adder=self.add)
+        if dlg.exec():
             self.load_data()
 
-    def edit_entry(self):
-        """Handle 'Edit'"""
-        entity_id = self._selected_row_id()
-        if not entity_id:
+    def _on_edit(self):
+        _id = self._selected_id()
+        if not _id:
             return
-        dlg = self.dialog_cls(self.parent, entity_id)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
+        instance = self._find_instance(_id)
+        dlg = self.dialog_cls(self, title=f"Edit {self.name}", entity_id=_id, updater=self.update, instance=instance)
+        if dlg.exec():
             self.load_data()
 
-    def delete_entry(self):
-        """Handle 'Delete'"""
-        entity_id = self._selected_row_id()
-        if not entity_id:
+    def _on_delete(self):
+        _id = self._selected_id()
+        if not _id:
             return
-        name = self.table.item(self.table.currentRow(), 1).text()
-        if QMessageBox.question(self, "Confirm Delete",
-            f"Delete {self.name} '{name}'?") == QMessageBox.StandardButton.Yes:
-            if self.db_deleter(entity_id):
-                QMessageBox.information(self, "Success", f"{self.name} deleted.")
-                self.load_data()
-            else:
-                QMessageBox.critical(self, "Error", f"Failed to delete {self.name}.")
+        if QMessageBox.question(self, "Confirm", f"Delete this {self.name}?") != QMessageBox.StandardButton.Yes:
+            return
+        if self.delete(_id):
+            self.load_data()
+        else:
+            QMessageBox.critical(self, "Error", f"Failed to delete {self.name}.")
 
 
-# -----------------------------------------------------
-# MAIN TAB HOLDER
-# -----------------------------------------------------
+# -------------------------
+# Data Management Tab
+# -------------------------
 class DataManagementTab(QWidget):
-    """Main container for all entity management tabs"""
-
-    def __init__(self, db_manager):
+    def __init__(self, db):
         super().__init__()
-        self.db = db_manager
-        self.init_ui()
-
-    def init_ui(self):
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
 
-        # Create all four tabs
-        self.tabs.addTab(
-            EntityTab(self, "Faculty",
-                      ["ID", "Name", "Faculty Code", "Max Hours/Day"],
-                      FacultyDialog, self.db.get_faculties,
-                      self.db.add_faculty, self.db.delete_faculty),
-            "Faculty"
-        )
+        # Faculty
+        self._add_tab("Faculty", ["ID", "Name", "Faculty Code", "Max Hours/Day"],
+                      FacultyDialog, db.get_faculties, db.add_faculty, db.update_faculty, db.delete_faculty)
 
-        self.tabs.addTab(
-            EntityTab(self, "Subject",
-                      ["ID", "Code", "Name", "Type", "Duration", "Year", "Semester"],
-                      SubjectDialog, self.db.get_subjects,
-                      self.db.add_subject, self.db.delete_subject),
-            "Subjects"
-        )
+        # Subject
+        self._add_tab("Subject", ["ID", "Code", "Name", "Type", "Duration", "Year", "Semester"],
+                      SubjectDialog, db.get_subjects, db.add_subject, db.update_subject, db.delete_subject,
+                      field_map={"Type": "is_lab"})
 
-        self.tabs.addTab(
-            EntityTab(self, "Venue",
-                      ["ID", "Name", "Type", "Capacity", "Building", "Floor"],
-                      VenueDialog, self.db.get_venues,
-                      self.db.add_venue, self.db.delete_venue),
-            "Venues"
-        )
+        # Venue
+        self._add_tab("Venue", ["ID", "Name", "Type", "Capacity", "Building", "Floor"],
+                      VenueDialog, db.get_venues, db.add_venue, db.update_venue, db.delete_venue,
+                      field_map={"Type": "venue_type"})
 
-        self.tabs.addTab(
-            EntityTab(self, "Section",
-                      ["ID", "Name", "Degree", "Year", "Semester", "Subsections"],
-                      SectionDialog, self.db.get_sections,
-                      self.db.add_section, self.db.delete_section),
-            "Sections"
-        )
+        # Section
+        self._add_tab("Section", ["ID", "Name", "Degree", "Year", "Semester", "Subsections"],
+                      SectionDialog, db.get_sections, db.add_section, db.update_section, db.delete_section,
+                      field_map={"Subsections": "subsections"})
+
+    def _add_tab(self, title, cols, dialog_cls, getter, adder, updater, deleter, field_map=None):
+        self.tabs.addTab(EntityTab(self, title, cols, dialog_cls, getter, adder, updater, deleter, field_map), title)
 
 
-# -----------------------------------------------------
-# GENERIC DIALOG BASE + SPECIFIC ONES
-# -----------------------------------------------------
+# -------------------------
+# Generic Dialog Base
+# -------------------------
 class BaseDialog(QDialog):
-    """Reusable base for Add/Edit dialogs"""
-
-    def __init__(self, parent, title):
+    def __init__(self, parent, title, adder=None, updater=None, entity_id=None, instance=None):
         super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setModal(True)
+        self.adder, self.updater, self.entity_id, self.instance = adder, updater, entity_id, instance
         self.layout = QFormLayout(self)
+        self.fields = {}
+        self.setWindowTitle(title)
         self.resize(400, 250)
-        self.init_fields()
-        self.init_buttons()
+        self._build_fields()
+        self._add_buttons()
+        if self.instance:
+            self._populate(self.instance)
 
-    def init_buttons(self):
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        btns.accepted.connect(self.accept)
+    def _add_field(self, label, widget):
+        self.fields[label] = widget
+        self.layout.addRow(label, widget)
+
+    def _add_buttons(self):
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.save)
         btns.rejected.connect(self.reject)
         self.layout.addRow(btns)
 
-    def warn_if_empty(self, *fields):
-        """Quick validator"""
-        if any(not f.text().strip() for f in fields):
-            QMessageBox.warning(self, "Warning", "Please fill in all required fields")
-            return True
-        return False
+    def _validate(self):
+        for w in self.fields.values():
+            if isinstance(w, QLineEdit) and not w.text().strip():
+                QMessageBox.warning(self, "Missing", "All fields must be filled.")
+                return False
+        return True
+
+    def _populate(self, instance): pass
+    def _build_fields(self): pass
+    def save(self): raise NotImplementedError
 
 
+# -------------------------
+# Faculty Dialog
+# -------------------------
 class FacultyDialog(BaseDialog):
-    def __init__(self, parent, _id=None):
-        self.parent, self.id = parent, _id
-        super().__init__(parent, "Add Faculty" if not _id else "Edit Faculty")
+    def _build_fields(self):
+        self._add_field("Name", QLineEdit())
+        self._add_field("Faculty Code", QLineEdit())
+        s = QSpinBox(); s.setRange(1, 12)
+        self._add_field("Max Hours/Day", s)
 
-    def init_fields(self):
-        self.name = QLineEdit()
-        self.code = QLineEdit()
-        self.max_hours = QSpinBox()
-        self.max_hours.setRange(1, 12)
-        self.layout.addRow("Name:", self.name)
-        self.layout.addRow("Faculty Code:", self.code)
-        self.layout.addRow("Max Hours/Day:", self.max_hours)
+    def _populate(self, f: Faculty):
+        self.fields["Name"].setText(f.name)
+        self.fields["Faculty Code"].setText(f.faculty_code)
+        self.fields["Max Hours/Day"].setValue(getattr(f, "max_hours_per_day", 6))
 
-    def accept(self):
-        if self.warn_if_empty(self.name, self.code): return
-        self.parent.db.add_faculty(self.name.text(), self.code.text(), self.max_hours.value())
-        super().accept()
+    def save(self):
+        if not self._validate(): return
+        f = self.fields
+        if self.entity_id:
+            self.updater(self.entity_id, f["Name"].text(), f["Faculty Code"].text(), f["Max Hours/Day"].value())
+        else:
+            self.adder(f["Name"].text(), f["Faculty Code"].text(), f["Max Hours/Day"].value())
+        self.accept()
 
 
+# -------------------------
+# Subject Dialog
+# -------------------------
 class SubjectDialog(BaseDialog):
-    def __init__(self, parent, _id=None):
-        self.parent, self.id = parent, _id
-        super().__init__(parent, "Add Subject" if not _id else "Edit Subject")
+    def _build_fields(self):
+        self._add_field("Code", QLineEdit())
+        self._add_field("Name", QLineEdit())
+        t = QComboBox(); t.addItems(["Lecture", "Lab"]); self._add_field("Type", t)
+        d = QSpinBox(); d.setRange(1, 4); self._add_field("Duration", d)
+        y = QSpinBox(); y.setRange(1, 4); self._add_field("Year", y)
+        s = QSpinBox(); s.setRange(1, 8); self._add_field("Semester", s)
 
-    def init_fields(self):
-        self.code = QLineEdit()
-        self.name = QLineEdit()
-        self.type = QComboBox()
-        self.type.addItems(["Lecture", "Lab"])
-        self.duration = QSpinBox(); self.duration.setRange(1, 4)
-        self.year = QSpinBox(); self.year.setRange(1, 4)
-        self.sem = QSpinBox(); self.sem.setRange(1, 8)
-        self.layout.addRow("Code:", self.code)
-        self.layout.addRow("Name:", self.name)
-        self.layout.addRow("Type:", self.type)
-        self.layout.addRow("Duration:", self.duration)
-        self.layout.addRow("Year:", self.year)
-        self.layout.addRow("Semester:", self.sem)
+    def _populate(self, s: Subject):
+        self.fields["Code"].setText(s.code)
+        self.fields["Name"].setText(s.name)
+        self.fields["Type"].setCurrentText("Lab" if s.is_lab else "Lecture")
+        self.fields["Duration"].setValue(getattr(s, "duration", 1))
+        self.fields["Year"].setValue(getattr(s, "year", 1))
+        self.fields["Semester"].setValue(getattr(s, "semester", 1))
 
-    def accept(self):
-        if self.warn_if_empty(self.code, self.name): return
-        self.parent.db.add_subject(
-            self.code.text(), self.name.text(),
-            self.type.currentText() == "Lab",
-            self.duration.value(), self.sem.value(), self.year.value(), "B.Tech"
-        )
-        super().accept()
+    def save(self):
+        if not self._validate(): return
+        f = self.fields
+        args = (f["Code"].text(), f["Name"].text(), f["Type"].currentText() == "Lab",
+                f["Duration"].value(), f["Semester"].value(), f["Year"].value(), "B.Tech")
+        if self.entity_id: self.updater(self.entity_id, *args)
+        else: self.adder(*args)
+        self.accept()
 
 
+# -------------------------
+# Venue Dialog
+# -------------------------
 class VenueDialog(BaseDialog):
-    def __init__(self, parent, _id=None):
-        self.parent, self.id = parent, _id
-        super().__init__(parent, "Add Venue" if not _id else "Edit Venue")
+    def _build_fields(self):
+        self._add_field("Name", QLineEdit())
+        t = QComboBox(); t.addItems(["lecture", "lab"]); self._add_field("Type", t)
+        c = QSpinBox(); c.setRange(1, 500); self._add_field("Capacity", c)
+        b = QLineEdit("Main Building"); self._add_field("Building", b)
+        f = QSpinBox(); f.setRange(0, 10); self._add_field("Floor", f)
 
-    def init_fields(self):
-        self.name = QLineEdit()
-        self.type = QComboBox(); self.type.addItems(["lecture", "lab"])
-        self.capacity = QSpinBox(); self.capacity.setRange(1, 500)
-        self.building = QLineEdit("Main Building")
-        self.floor = QSpinBox(); self.floor.setRange(0, 10)
-        self.layout.addRow("Name:", self.name)
-        self.layout.addRow("Type:", self.type)
-        self.layout.addRow("Capacity:", self.capacity)
-        self.layout.addRow("Building:", self.building)
-        self.layout.addRow("Floor:", self.floor)
+    def _populate(self, v: Venue):
+        self.fields["Name"].setText(v.name)
+        self.fields["Type"].setCurrentText(v.venue_type)
+        self.fields["Capacity"].setValue(v.capacity)
+        self.fields["Building"].setText(v.building)
+        self.fields["Floor"].setValue(v.floor)
 
-    def accept(self):
-        if self.warn_if_empty(self.name): return
-        self.parent.db.add_venue(
-            self.name.text(), self.type.currentText(), self.capacity.value(),
-            self.building.text(), self.floor.value()
-        )
-        super().accept()
+    def save(self):
+        if not self._validate(): return
+        f = self.fields
+        args = (f["Name"].text(), f["Type"].currentText(), f["Capacity"].value(),
+                f["Building"].text(), f["Floor"].value())
+        if self.entity_id: self.updater(self.entity_id, *args)
+        else: self.adder(*args)
+        self.accept()
 
 
+# -------------------------
+# Section Dialog
+# -------------------------
 class SectionDialog(BaseDialog):
-    def __init__(self, parent, _id=None):
-        self.parent, self.id = parent, _id
-        super().__init__(parent, "Add Section" if not _id else "Edit Section")
+    def _build_fields(self):
+        self._add_field("Name", QLineEdit())
+        d = QComboBox(); d.addItems(["B.Tech", "M.Tech"]); self._add_field("Degree", d)
+        y = QSpinBox(); y.setRange(1, 4); self._add_field("Year", y)
+        s = QSpinBox(); s.setRange(1, 8); self._add_field("Semester", s)
+        subs = QLineEdit(); subs.setPlaceholderText("A1, A2, A3"); self._add_field("Subsections", subs)
 
-    def init_fields(self):
-        self.name = QLineEdit()
-        self.degree = QComboBox(); self.degree.addItems(["B.Tech", "M.Tech"])
-        self.year = QSpinBox(); self.year.setRange(1, 4)
-        self.sem = QSpinBox(); self.sem.setRange(1, 8)
-        self.subs = QLineEdit(); self.subs.setPlaceholderText("A1, A2, A3")
-        self.layout.addRow("Name:", self.name)
-        self.layout.addRow("Degree:", self.degree)
-        self.layout.addRow("Year:", self.year)
-        self.layout.addRow("Semester:", self.sem)
-        self.layout.addRow("Subsections:", self.subs)
+    def _populate(self, sec: Section):
+        self.fields["Name"].setText(sec.name)
+        self.fields["Degree"].setCurrentText(sec.degree)
+        self.fields["Year"].setValue(sec.year)
+        self.fields["Semester"].setValue(sec.semester)
+        self.fields["Subsections"].setText(", ".join(sec.subsections or []))
 
-    def accept(self):
-        if self.warn_if_empty(self.name): return
-        subs = [s.strip() for s in self.subs.text().split(",") if s.strip()]
-        self.parent.db.add_section(self.name.text(), self.sem.value(),
-                                   self.year.value(), self.degree.currentText(),
-                                   subs, 60)
-        super().accept()
+    def save(self):
+        if not self._validate(): return
+        f = self.fields
+        subs = [s.strip() for s in f["Subsections"].text().split(",") if s.strip()]
+        args = (f["Name"].text(), f["Semester"].value(), f["Year"].value(),
+                f["Degree"].currentText(), subs, 60)
+        if self.entity_id: self.updater(self.entity_id, *args)
+        else: self.adder(*args)
+        self.accept()
