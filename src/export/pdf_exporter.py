@@ -3,7 +3,7 @@ PDF Exporter for Timetable Generator
 Generates professional PDFs and HTML previews of timetables.
 Now supports:
 - Visible lunch slots
-- Multiple faculty names for labs
+- Always shows faculty names (no ORM dependency)
 """
 
 from datetime import datetime
@@ -118,8 +118,7 @@ class PDFExporter:
                 if slot.get("is_lunch", False):
                     html += "<td class='lunch'>Lunch Break</td>"
                 else:
-                    cell = self._html_cell(assignments, day, slot['start'])
-                    html += cell
+                    html += self._html_cell(assignments, day, slot['start'])
             html += "</tr>"
         html += """
                 </tbody>
@@ -210,29 +209,46 @@ class PDFExporter:
                 slots.append({'start': to_time(t), 'end': to_time(t + 60)})
         return slots
 
+    # ---------------------------------------------------------
+    # FIXED CELLS — FACULTY ALWAYS SHOWN
+    # ---------------------------------------------------------
     def _pdf_cell(self, assignments, day, start_time):
-        """Return plain text for cell in PDF table (supports multiple faculties)."""
+        """Return plain text for cell in PDF table (always shows faculty names)."""
         match = [a for a in assignments if a.day == day and a.start_time == start_time]
         if not match:
             return ""
+
         a = match[0]
-        subj, ven = getattr(a, "subject", None), getattr(a, "venue", None)
-        faculties = getattr(a, "faculties", [getattr(a, "faculty", None)])
-        faculty_names = ", ".join(f"{f.name}" for f in faculties if f)
-        if not subj or not ven:
+        subj_code = getattr(a, "subject_code", getattr(a.subject, "code", ""))
+        subj_name = getattr(a, "subject_name", getattr(a.subject, "name", ""))
+        faculty_name = getattr(a, "faculty_name", "")
+        if not faculty_name and getattr(a, "faculty", None):
+            faculty_name = getattr(a.faculty, "name", "Unknown Faculty")
+
+        venue_name = getattr(a, "venue_name", getattr(a.venue, "name", ""))
+        if not subj_name and not subj_code:
             return "Data Missing"
-        return f"{subj.code}\n{subj.name}\n{faculty_names}\n{ven.name}"
+
+        return f"{subj_code}\n{subj_name}\n{faculty_name}\n{venue_name}"
 
     def _html_cell(self, assignments, day, start_time):
-        """Return HTML cell with proper color class and multi-faculty support."""
+        """Return HTML cell with proper color class and faculty names."""
         match = [a for a in assignments if a.day == day and a.start_time == start_time]
         if not match:
             return "<td></td>"
+
         a = match[0]
-        subj, ven = getattr(a, "subject", None), getattr(a, "venue", None)
-        faculties = getattr(a, "faculties", [getattr(a, "faculty", None)])
-        faculty_names = ", ".join(f"{f.name}" for f in faculties if f)
-        if not subj or not ven:
-            return "<td>Data Missing</td>"
-        cell_class = "lab" if getattr(subj, "is_lab", False) else "lecture"
-        return f"<td class='{cell_class}'>{subj.code}<br>{subj.name}<br>{faculty_names}<br>{ven.name}</td>"
+        subj_code = getattr(a, "subject_code", getattr(a.subject, "code", ""))
+        subj_name = getattr(a, "subject_name", getattr(a.subject, "name", ""))
+        faculty_name = getattr(a, "faculty_name", "")
+        if not faculty_name and getattr(a, "faculty", None):
+            faculty_name = getattr(a.faculty, "name", "Unknown Faculty")
+
+        venue_name = getattr(a, "venue_name", getattr(a.venue, "name", ""))
+        cell_class = "lab" if getattr(a, "is_lab", getattr(a.subject, "is_lab", False)) else "lecture"
+
+        return (
+            f"<td class='{cell_class}'>"
+            f"{subj_code}<br>{subj_name}<br>"
+            f"{faculty_name}<br>{venue_name}</td>"
+        )
