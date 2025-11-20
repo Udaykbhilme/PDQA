@@ -1,301 +1,360 @@
-"""
-Database Manager for Timetable Generator
+import sqlite3
+import json
+import threading
+from pathlib import Path
 
-Handles:
-- Database initialization (SQLite)
-- Session management
-- CRUD utilities for Faculty, Subject, Venue, Section
-- Seeding with sample data for first run
-"""
-
-import os
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.exc import SQLAlchemyError
-
-from .db_models import Base, Faculty, Subject, Venue, Section
-
+from .db_models import Faculty, Subject, Venue, Section
 
 class DatabaseManager:
-    """Manages database connections and operations."""
+    """
+    SQLite manager with safe multi-thread reads and serialized writes.
+    - check_same_thread=False (allows worker thread access)
+    - WAL mode for simultaneous read/write
+    - threading.Lock() for all writes
+    """
 
-    def __init__(self, db_path: str = "timetable.db"):
-        """Initialize database manager with SQLite database."""
+    def __init__(self, db_path="timetable.db"):
         self.db_path = db_path
-        self.engine = None
-        self.SessionLocal = None
-        self._initialize_engine()
+        Path(db_path).touch(exist_ok=True)
 
-    # ---------------------------------------------------------------------
-    # INITIALIZATION
-    # ---------------------------------------------------------------------
-    def _initialize_engine(self):
-        """Initialize SQLAlchemy engine and session factory."""
+        # main DB connection
+        self.conn = sqlite3.connect(
+            self.db_path,
+            check_same_thread=False,
+            timeout=30
+        )
+        self.conn.row_factory = sqlite3.Row
+
+        # enable WAL mode for thread-safe reads
+        self.conn.execute("PRAGMA journal_mode = WAL;")
+        self.conn.execute("PRAGMA synchronous = NORMAL;")
+        self.conn.execute("PRAGMA foreign_keys = ON;")
+
+        # serialize write operations
+        self._lock = threading.Lock()
+
+        self._create_tables()
+
+    # ---------------------------------------------------------
+    # THREAD-SAFE READ CONNECTION
+    # ---------------------------------------------------------
+    def get_read_only_connection(self):
+        """Safe connection for worker threads (scheduler)."""
+        conn = sqlite3.connect(
+            f"file:{self.db_path}?mode=ro",
+            uri=True,
+            check_same_thread=False
+        )
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    # ---------------------------------------------------------
+    # TABLE CREATION
+    # ---------------------------------------------------------
+    def _create_tables(self):
+        cur = self.conn.cursor()
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS faculties (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            faculty_code TEXT NOT NULL,
+            max_hours_per_day INTEGER DEFAULT 6
+        );
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS subjects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            is_lab INTEGER DEFAULT 0,
+            duration INTEGER DEFAULT 1,
+            year INTEGER NOT NULL,
+            semester INTEGER NOT NULL,
+            degree TEXT DEFAULT 'B.Tech',
+            preferred_faculty_ids TEXT DEFAULT '[]'
+        );
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS venues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            venue_type TEXT NOT NULL,
+            capacity INTEGER DEFAULT 60,
+            building TEXT DEFAULT 'Main Building',
+            floor INTEGER DEFAULT 1
+        );
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS sections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            degree TEXT DEFAULT 'B.Tech',
+            year INTEGER NOT NULL,
+            semester INTEGER NOT NULL,
+            strength INTEGER DEFAULT 60,
+            subsections TEXT DEFAULT '[]'
+        );
+        """)
+
+        self.conn.commit()
+
+    # ---------------------------------------------------------
+    # PARSERS -> Dataclasses
+    # ---------------------------------------------------------
+    def _faculty_from_row(self, r):
+        return Faculty(
+            id=r["id"],
+            name=r["name"],
+            faculty_code=r["faculty_code"],
+            max_hours_per_day=r["max_hours_per_day"]
+        )
+
+    def _subject_from_row(self, r):
+        return Subject(
+            id=r["id"],
+            code=r["code"],
+            name=r["name"],
+            is_lab=bool(r["is_lab"]),
+            duration=r["duration"],
+            year=r["year"],
+            semester=r["semester"],
+            degree=r["degree"],
+            preferred_faculty_ids=json.loads(r["preferred_faculty_ids"] or "[]")
+        )
+
+    def _venue_from_row(self, r):
+        return Venue(
+            id=r["id"],
+            name=r["name"],
+            venue_type=r["venue_type"],
+            capacity=r["capacity"],
+            building=r["building"],
+            floor=r["floor"]
+        )
+
+    def _section_from_row(self, r):
+        return Section(
+            id=r["id"],
+            name=r["name"],
+            degree=r["degree"],
+            year=r["year"],
+            semester=r["semester"],
+            strength=r["strength"],
+            subsections=json.loads(r["subsections"] or "[]")
+        )
+
+    # ---------------------------------------------------------
+    # GENERIC FETCH
+    # ---------------------------------------------------------
+    def _fetch_rows(self, query, params=()):
         try:
-            self.engine = create_engine(
-                f"sqlite:///{self.db_path}",
-                echo=False,
-                connect_args={"check_same_thread": False},
+            cur = self.conn.cursor()
+            cur.execute(query, params)
+            return cur.fetchall()
+        except sqlite3.OperationalError as e:
+            print("READ ERROR:", e)
+            return []
+
+    # ---------------------------------------------------------
+    # FACULTY CRUD
+    # ---------------------------------------------------------
+    def get_faculties(self):
+        rows = self._fetch_rows("SELECT * FROM faculties")
+        return [self._faculty_from_row(r) for r in rows]
+
+    def add_faculty(self, name, code, max_hours=6):
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                "INSERT INTO faculties (name, faculty_code, max_hours_per_day) VALUES (?, ?, ?)",
+                (name, code, max_hours)
             )
-            self.SessionLocal = sessionmaker(bind=self.engine, autocommit=False, autoflush=False)
-        except Exception as e:
-            raise RuntimeError(f"Error initializing database engine: {e}")
+            self.conn.commit()
+            return cur.lastrowid
 
-    def initialize_database(self):
-        """Create tables and seed if empty."""
-        try:
-            Base.metadata.create_all(bind=self.engine)
-            with self.get_session() as session:
-                if session.query(Faculty).count() == 0:
-                    self._seed_database(session)
-        except SQLAlchemyError as e:
-            raise RuntimeError(f"Error initializing database: {e}")
+    def update_faculty(self, faculty_id, name, code, max_hours):
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                "UPDATE faculties SET name=?, faculty_code=?, max_hours_per_day=? WHERE id=?",
+                (name, code, max_hours, faculty_id)
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
 
-    def get_session(self) -> Session:
-        """Get new session."""
-        return self.SessionLocal()
+    def delete_faculty(self, faculty_id):
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("DELETE FROM faculties WHERE id=?", (faculty_id,))
+            self.conn.commit()
+            return cur.rowcount > 0
 
-    # ---------------------------------------------------------------------
-    # SEEDING
-    # ---------------------------------------------------------------------
-    def _seed_database(self, session: Session):
-        """Seed initial data for first run."""
-        try:
-            # Faculties
-            faculties = [
-                Faculty(name="Dr. Rajesh Kumar", faculty_code="RK001"),
-                Faculty(name="Prof. Sunita Sharma", faculty_code="SS002"),
-                Faculty(name="Dr. Amit Patel", faculty_code="AP003"),
-                Faculty(name="Prof. Priya Singh", faculty_code="PS004"),
-                Faculty(name="Dr. Vikram Gupta", faculty_code="VG005"),
-                Faculty(name="Prof. Neha Agarwal", faculty_code="NA006"),
-            ]
-            session.add_all(faculties)
+    # ---------------------------------------------------------
+    # SUBJECT CRUD
+    # ---------------------------------------------------------
+    def _parse_num_list(self, x):
+        """Handles: [2,3], (2,3), '2,3', '2', int."""
+        if isinstance(x, (list, tuple)):
+            return list(x)
+        if isinstance(x, int):
+            return [x]
+        if isinstance(x, str):
+            return [int(i.strip()) for i in x.split(",") if i.strip().isdigit()]
+        return []
 
-            # Subjects
-            subjects = [
-                # 3rd Year
-                Subject(code="CS301", name="Data Structures and Algorithms", is_lab=False, year=3, semester=5),
-                Subject(code="CS301L", name="Data Structures and Algorithms Lab", is_lab=True, year=3, semester=5),
-                Subject(code="CS302", name="Database Management Systems", is_lab=False, year=3, semester=5),
-                Subject(code="CS302L", name="Database Management Systems Lab", is_lab=True, year=3, semester=5),
-                Subject(code="CS303", name="Computer Networks", is_lab=False, year=3, semester=5),
-                Subject(code="CS303L", name="Computer Networks Lab", is_lab=True, year=3, semester=5),
-                Subject(code="CS304", name="Software Engineering", is_lab=False, year=3, semester=5),
-                Subject(code="CS304L", name="Software Engineering Lab", is_lab=True, year=3, semester=5),
-                Subject(code="CS305", name="Operating Systems", is_lab=False, year=3, semester=5),
-                Subject(code="CS305L", name="Operating Systems Lab", is_lab=True, year=3, semester=5),
+    def get_subjects(self, year=None, semester=None, degree=None):
+        q = "SELECT * FROM subjects WHERE 1=1"
+        params = []
 
-                # 4th Year
-                Subject(code="CS401", name="Machine Learning", is_lab=False, year=4, semester=7),
-                Subject(code="CS401L", name="Machine Learning Lab", is_lab=True, year=4, semester=7),
-                Subject(code="CS402", name="Artificial Intelligence", is_lab=False, year=4, semester=7),
-                Subject(code="CS402L", name="Artificial Intelligence Lab", is_lab=True, year=4, semester=7),
-            ]
-            session.add_all(subjects)
+        if year is not None:
+            years = self._parse_num_list(year)
+            placeholders = ",".join("?" for _ in years)
+            q += f" AND year IN ({placeholders})"
+            params.extend(years)
 
-            # Venues
-            venues = [
-                Venue(name="LT-101", venue_type="lecture", capacity=120, building="Main Building", floor=1),
-                Venue(name="LT-102", venue_type="lecture", capacity=100, building="Main Building", floor=1),
-                Venue(name="LT-201", venue_type="lecture", capacity=80, building="Main Building", floor=2),
-                Venue(name="LAB-101", venue_type="lab", capacity=30, building="Computer Center", floor=1),
-                Venue(name="LAB-102", venue_type="lab", capacity=30, building="Computer Center", floor=1),
-                Venue(name="LAB-201", venue_type="lab", capacity=25, building="Computer Center", floor=2),
-            ]
-            session.add_all(venues)
+        if semester is not None:
+            sems = self._parse_num_list(semester)
+            placeholders = ",".join("?" for _ in sems)
+            q += f" AND semester IN ({placeholders})"
+            params.extend(sems)
 
-            # Sections
-            sections = [
-                Section(name="A", degree="B.Tech", year=3, semester=5, subsections=["A1", "A2", "A3"]),
-                Section(name="B", degree="B.Tech", year=3, semester=5, subsections=["B1", "B2", "B3"]),
-                Section(name="A", degree="B.Tech", year=4, semester=7, subsections=["A1", "A2", "A3"]),
-                Section(name="B", degree="B.Tech", year=4, semester=7, subsections=["B1", "B2", "B3"]),
-            ]
-            session.add_all(sections)
+        if degree:
+            q += " AND degree=?"
+            params.append(degree)
 
-            session.commit()
-            print("✅ Database seeded successfully with sample data.")
+        rows = self._fetch_rows(q, tuple(params))
+        return [self._subject_from_row(r) for r in rows]
 
-        except SQLAlchemyError as e:
-            session.rollback()
-            raise RuntimeError(f"Error seeding database: {e}")
+    def add_subject(self, code, name, is_lab, duration, semester, year, degree="B.Tech"):
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("""
+                INSERT INTO subjects (code, name, is_lab, duration, semester, year, degree)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (code, name, int(is_lab), duration, semester, year, degree))
+            self.conn.commit()
+            return cur.lastrowid
 
-    # ---------------------------------------------------------------------
-    # GETTERS
-    # ---------------------------------------------------------------------
-    def get_faculties(self) -> list[Faculty]:
-        with self.get_session() as session:
-            return session.query(Faculty).all()
+    def update_subject(self, subject_id, code, name, is_lab, duration, semester, year, degree, preferred=None):
+        if preferred is None:
+            preferred = []
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("""
+                UPDATE subjects SET 
+                    code=?, name=?, is_lab=?, duration=?, semester=?, year=?, degree=?, 
+                    preferred_faculty_ids=?
+                WHERE id=?
+            """, (code, name, int(is_lab), duration, semester, year, degree,
+                  json.dumps(preferred), subject_id))
+            self.conn.commit()
+            return cur.rowcount > 0
 
-    def get_subjects(self, year: int = None, semester: int = None, degree: str = None) -> list[Subject]:
-        with self.get_session() as session:
-            q = session.query(Subject)
-            if year:
-                q = q.filter(Subject.year == year)
-            if semester:
-                q = q.filter(Subject.semester == semester)
-            if degree:
-                q = q.filter(Subject.degree == degree)
-            return q.all()
+    def delete_subject(self, subject_id):
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("DELETE FROM subjects WHERE id=?", (subject_id,))
+            self.conn.commit()
+            return cur.rowcount > 0
 
-    def get_venues(self, venue_type: str = None) -> list[Venue]:
-        with self.get_session() as session:
-            q = session.query(Venue)
-            if venue_type:
-                q = q.filter(Venue.venue_type == venue_type)
-            return q.all()
+    # ---------------------------------------------------------
+    # VENUE CRUD
+    # ---------------------------------------------------------
+    def get_venues(self):
+        rows = self._fetch_rows("SELECT * FROM venues")
+        return [self._venue_from_row(r) for r in rows]
 
-    def get_sections(self, year: int = None, semester: int = None, degree: str = None) -> list[Section]:
-        with self.get_session() as session:
-            q = session.query(Section)
-            if year:
-                q = q.filter(Section.year == year)
-            if semester:
-                q = q.filter(Section.semester == semester)
-            if degree:
-                q = q.filter(Section.degree == degree)
-            return q.all()
+    def add_venue(self, name, venue_type, capacity=60, building="Main Building", floor=1):
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("""
+                INSERT INTO venues (name, venue_type, capacity, building, floor)
+                VALUES (?, ?, ?, ?, ?)
+            """, (name, venue_type, capacity, building, floor))
+            self.conn.commit()
+            return cur.lastrowid
 
-    # ---------------------------------------------------------------------
-    # CREATE / ADD
-    # ---------------------------------------------------------------------
-    def add_faculty(self, name: str, faculty_code: str, max_hours_per_day: int = 6) -> Faculty:
-        with self.get_session() as session:
-            fac = Faculty(name=name, faculty_code=faculty_code, max_hours_per_day=max_hours_per_day)
-            session.add(fac)
-            session.commit()
-            session.refresh(fac)
-            return fac
+    def update_venue(self, venue_id, name, venue_type, capacity, building, floor):
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("""
+                UPDATE venues SET name=?, venue_type=?, capacity=?, building=?, floor=?
+                WHERE id=?
+            """, (name, venue_type, capacity, building, floor, venue_id))
+            self.conn.commit()
+            return cur.rowcount > 0
 
-    def add_subject(self, code: str, name: str, is_lab: bool, duration: int,
-                    semester: int, year: int, degree: str = "B.Tech") -> Subject:
-        with self.get_session() as session:
-            sub = Subject(code=code, name=name, is_lab=is_lab, duration=duration,
-                          semester=semester, year=year, degree=degree)
-            session.add(sub)
-            session.commit()
-            session.refresh(sub)
-            return sub
+    def delete_venue(self, venue_id):
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("DELETE FROM venues WHERE id=?", (venue_id,))
+            self.conn.commit()
+            return cur.rowcount > 0
 
-    def add_venue(self, name: str, venue_type: str, capacity: int = 60,
-                  building: str = "Main Building", floor: int = 1) -> Venue:
-        with self.get_session() as session:
-            v = Venue(name=name, venue_type=venue_type, capacity=capacity,
-                      building=building, floor=floor)
-            session.add(v)
-            session.commit()
-            session.refresh(v)
-            return v
+    # ---------------------------------------------------------
+    # SECTIONS CRUD
+    # ---------------------------------------------------------
+    def get_sections(self, year=None, semester=None, degree=None):
+        q = "SELECT * FROM sections WHERE 1=1"
+        params = []
 
-    def add_section(self, name: str, semester: int, year: int,
-                    degree: str = "B.Tech", subsections: list = None, strength: int = 60) -> Section:
+        if year is not None:
+            years = self._parse_num_list(year)
+            placeholders = ",".join("?" for _ in years)
+            q += f" AND year IN ({placeholders})"
+            params.extend(years)
+
+        if semester is not None:
+            sems = self._parse_num_list(semester)
+            placeholders = ",".join("?" for _ in sems)
+            q += f" AND semester IN ({placeholders})"
+            params.extend(sems)
+
+        if degree:
+            q += " AND degree=?"
+            params.append(degree)
+
+        rows = self._fetch_rows(q, tuple(params))
+        return [self._section_from_row(r) for r in rows]
+
+    def add_section(self, name, semester, year, degree="B.Tech", subsections=None, strength=60):
         if subsections is None:
             subsections = []
-        with self.get_session() as session:
-            sec = Section(name=name, semester=semester, year=year,
-                          degree=degree, subsections=subsections, strength=strength)
-            session.add(sec)
-            session.commit()
-            session.refresh(sec)
-            return sec
-
-    # ---------------------------------------------------------------------
-    # DELETE
-    # ---------------------------------------------------------------------
-    def delete_faculty(self, faculty_id: int) -> bool:
-        return self._delete_entity(Faculty, faculty_id)
-
-    def delete_subject(self, subject_id: int) -> bool:
-        return self._delete_entity(Subject, subject_id)
-
-    def delete_venue(self, venue_id: int) -> bool:
-        return self._delete_entity(Venue, venue_id)
-
-    def delete_section(self, section_id: int) -> bool:
-        return self._delete_entity(Section, section_id)
-
-    def _delete_entity(self, model, entity_id: int) -> bool:
-        """Generic delete helper."""
-        try:
-            with self.get_session() as session:
-                obj = session.query(model).filter(model.id == entity_id).first()
-                if obj:
-                    session.delete(obj)
-                    session.commit()
-                    return True
-                return False
-        except SQLAlchemyError:
-            return False
-
-    # ---------------------------------------------------------------------
-    # UPDATE (NEWLY ADDED)
-    # ---------------------------------------------------------------------
-    def update_faculty(self, faculty_id, name, code, max_hours):
-        """Update faculty details."""
-        try:
-            with self.get_session() as session:
-                fac = session.get(Faculty, faculty_id)
-                if fac:
-                    fac.name = name
-                    fac.faculty_code = code
-                    fac.max_hours_per_day = max_hours
-                    session.commit()
-                    return True
-                return False
-        except SQLAlchemyError:
-            return False
-
-    def update_subject(self, subject_id, code, name, is_lab, duration, semester, year, degree):
-        """Update subject details."""
-        try:
-            with self.get_session() as session:
-                sub = session.get(Subject, subject_id)
-                if sub:
-                    sub.code = code
-                    sub.name = name
-                    sub.is_lab = is_lab
-                    sub.duration = duration
-                    sub.semester = semester
-                    sub.year = year
-                    sub.degree = degree
-                    session.commit()
-                    return True
-                return False
-        except SQLAlchemyError:
-            return False
-
-    def update_venue(self, venue_id, name, vtype, capacity, building, floor):
-        """Update venue details."""
-        try:
-            with self.get_session() as session:
-                v = session.get(Venue, venue_id)
-                if v:
-                    v.name = name
-                    v.venue_type = vtype
-                    v.capacity = capacity
-                    v.building = building
-                    v.floor = floor
-                    session.commit()
-                    return True
-                return False
-        except SQLAlchemyError:
-            return False
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("""
+                INSERT INTO sections (name, semester, year, degree, subsections, strength)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (name, semester, year, degree, json.dumps(subsections), strength))
+            self.conn.commit()
+            return cur.lastrowid
 
     def update_section(self, section_id, name, semester, year, degree, subsections, strength):
-        """Update section details."""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("""
+                UPDATE sections SET name=?, semester=?, year=?, degree=?, subsections=?, strength=?
+                WHERE id=?
+            """, (name, semester, year, degree, json.dumps(subsections), strength, section_id))
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def delete_section(self, section_id):
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("DELETE FROM sections WHERE id=?", (section_id,))
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    # ---------------------------------------------------------
+    # Utility
+    # ---------------------------------------------------------
+    def close(self):
         try:
-            with self.get_session() as session:
-                s = session.get(Section, section_id)
-                if s:
-                    s.name = name
-                    s.semester = semester
-                    s.year = year
-                    s.degree = degree
-                    s.subsections = subsections
-                    s.strength = strength
-                    session.commit()
-                    return True
-                return False
-        except SQLAlchemyError:
-            return False
+            self.conn.close()
+        except Exception:
+            pass

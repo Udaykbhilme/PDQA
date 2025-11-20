@@ -1,16 +1,19 @@
 """
-Timetable Review Tab (Modern Fullscreen Edition)
-
-Now fills the full workspace area dynamically, removes wasted padding,
-and adapts to any window size. Dark sleek design for dashboard-like feel.
+Timetable Review Tab — MULTI-YEAR VERSION
+Stable with:
+✔ Multiple years
+✔ Multiple semesters
+✔ Multiple sections
+✔ Flattened assignment objects
+✔ Stacked classes in a single cell
 """
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QMessageBox
 )
+from PyQt6.QtGui import QColor, QBrush
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QBrush, QFont
 
 
 class TimetableReviewTab(QWidget):
@@ -24,12 +27,14 @@ class TimetableReviewTab(QWidget):
         self.conflicts = []
         self._setup_ui()
 
-    # ------------------ UI SETUP ------------------ #
+    # ---------------------------------------------------
+    # UI SETUP
+    # ---------------------------------------------------
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
 
+        # Header
         self.info = QLabel("No timetable loaded")
         self.info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.info.setStyleSheet("""
@@ -43,10 +48,11 @@ class TimetableReviewTab(QWidget):
         """)
         layout.addWidget(self.info)
 
-        # Timetable grid
+        # Table
         self.table = QTableWidget()
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
         self.table.setStyleSheet("""
             QTableWidget {
                 background: #0F0F0F;
@@ -64,60 +70,46 @@ class TimetableReviewTab(QWidget):
                 padding: 6px;
             }
         """)
-        self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.table.horizontalHeader().setMinimumSectionSize(120)
-
         layout.addWidget(self.table, stretch=1)
 
-        # Bottom buttons
-        btn_layout = QHBoxLayout()
-        btn_layout.setContentsMargins(12, 4, 12, 8)
-        btn_layout.setSpacing(12)
+        # Buttons
+        btns = QHBoxLayout()
+        self.approve_btn = self._btn("Approve", "#007f5f", self._approve)
+        self.regen_btn = self._btn("Regenerate", "#007ACC", self._regen)
+        btns.addWidget(self.approve_btn)
+        btns.addWidget(self.regen_btn)
+        layout.addLayout(btns)
 
-        self.approve_btn = self._styled_btn("Approve", "#007f5f", self._approve)
-        self.regen_btn = self._styled_btn("Regenerate", "#007ACC", self._regen)
-        btn_layout.addWidget(self.approve_btn)
-        btn_layout.addWidget(self.regen_btn)
-
-        layout.addLayout(btn_layout)
-        layout.setStretchFactor(self.table, 1)
-
-    def _styled_btn(self, text, color, callback):
-        btn = QPushButton(text)
-        btn.setStyleSheet(f"""
+    def _btn(self, label, color, callback):
+        b = QPushButton(label)
+        b.setEnabled(False)
+        b.setStyleSheet(f"""
             QPushButton {{
                 background-color: {color};
                 color: white;
-                border: none;
                 border-radius: 6px;
-                padding: 8px 20px;
+                padding: 8px 18px;
                 font-weight: 600;
-                font-size: 13px;
             }}
-            QPushButton:hover {{
-                background-color: #0096c7;
-            }}
-            QPushButton:disabled {{
-                background-color: #333;
-                color: #888;
-            }}
+            QPushButton:hover {{ opacity: 0.85; }}
         """)
-        btn.clicked.connect(callback)
-        btn.setEnabled(False)
-        return btn
+        b.clicked.connect(callback)
+        return b
 
-    # ------------------ RENDERING ------------------ #
-    def set_timetable(self, assignments, info, conflicts):
-        self.assignments, self.meta, self.conflicts = assignments, info, conflicts
+    # ---------------------------------------------------
+    # INPUT HANDLING
+    # ---------------------------------------------------
+    def set_timetable(self, assignments, meta, conflicts):
+        self.assignments = assignments
+        self.meta = meta
+        self.conflicts = conflicts
         self._render()
         self.approve_btn.setEnabled(True)
         self.regen_btn.setEnabled(True)
 
     def clear_timetable(self):
-        self.assignments.clear()
-        self.conflicts.clear()
+        self.assignments = []
+        self.conflicts = []
         self.table.clear()
         self.table.setRowCount(0)
         self.table.setColumnCount(0)
@@ -125,109 +117,116 @@ class TimetableReviewTab(QWidget):
         self.approve_btn.setEnabled(False)
         self.regen_btn.setEnabled(False)
 
+    # ---------------------------------------------------
+    # RENDERING
+    # ---------------------------------------------------
     def _render(self):
-        if not self.meta:
+        if not self.assignments:
             return
 
-        days = self.meta.get("days", ["Mon", "Tue", "Wed", "Thu", "Fri"])
-        start = self._to_min(self.meta.get("start_time", "09:00"))
-        end = self._to_min(self.meta.get("end_time", "17:00"))
-        lunch_start = self._to_min(self.meta.get("lunch_start", "13:00"))
-        lunch_end = self._to_min(self.meta.get("lunch_end", "14:00"))
+        days = self.meta.get("days", [])
+        start = self._min(self.meta["start_time"])
+        end = self._min(self.meta["end_time"])
+        lunch_start = self._min(self.meta["lunch_start"])
+        lunch_end = self._min(self.meta["lunch_end"])
 
-        slots = [{"start": self._fmt(t), "end": self._fmt(t + 60)} for t in range(start, end, 60)]
+        # Generate hour slots
+        slot_starts = list(range(start, end, 60))
 
-        header = f"{self.meta.get('degree', 'B.Tech')} Year {self.meta.get('year', '')} Sem {self.meta.get('semester', '')}"
-        self.info.setText(header)
+        # Header text
+        degree = self.meta.get("degree", "B.Tech")
+        years = self.meta.get("year", "Multiple")
+        sems = self.meta.get("semester", "Multiple")
+        self.info.setText(f"{degree} | Years: {years} | Semesters: {sems}")
 
-        self.table.setRowCount(len(slots))
+        # Table structure
+        self.table.setRowCount(len(slot_starts))
         self.table.setColumnCount(len(days) + 1)
         self.table.setHorizontalHeaderLabels(["Time"] + days)
 
-        for r, s in enumerate(slots):
-            time_item = QTableWidgetItem(f"{s['start']}\n{s['end']}")
-            time_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            time_item.setForeground(QBrush(QColor("#999")))
-            self.table.setItem(r, 0, time_item)
+        # Stable ordering
+        def sec_year(a):
+            sec = getattr(a, "section", None)
+            return getattr(sec, "year", 0)
 
-            for c, d in enumerate(days):
+        def sec_name(a):
+            sec = getattr(a, "section", None)
+            return getattr(sec, "name", "")
+
+        self.assignments.sort(key=lambda a: (a.day, self._min(a.start_time), sec_year(a), sec_name(a)))
+
+        for r, st in enumerate(slot_starts):
+            # Time label
+            item = QTableWidgetItem(f"{self._fmt(st)}\n{self._fmt(st+60)}")
+            item.setForeground(QBrush(QColor("#999")))
+            self.table.setItem(r, 0, item)
+
+            for c, day in enumerate(days):
                 cell = QTableWidgetItem()
-                start_m = self._to_min(s["start"])
+                cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-                # Lunch shading
-                if lunch_start <= start_m < lunch_end:
-                    cell.setBackground(QColor("#333333"))
+                # Lunch break
+                if lunch_start <= st < lunch_end:
                     cell.setText("Lunch Break")
-                    cell.setFlags(Qt.ItemFlag.ItemIsEnabled)
-                    cell.setForeground(QBrush(QColor("#888")))
-                    self.table.setItem(r, c + 1, cell)
+                    cell.setBackground(QColor("#333"))
+                    self.table.setItem(r, c+1, cell)
                     continue
 
-                # Normal class slot
-                txt, color = self._cell_text_and_color(d, s["start"])
-                cell.setText(txt)
-                cell.setBackground(color)
-                cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table.setItem(r, c + 1, cell)
-                self.table.setRowHeight(r, 100)
+                # Classes for this slot
+                classes = [
+                    a for a in self.assignments
+                    if a.day == day and self._min(a.start_time) == st
+                ]
+
+                if not classes:
+                    cell.setBackground(QColor("#111"))
+                    self.table.setItem(r, c+1, cell)
+                    continue
+
+                parts = []
+                for a in classes:
+                    sec = getattr(a, "section", None)
+                    sec_name = sec.name if sec else getattr(a, "section_name", "")
+
+                    subj = a.subject_code
+                    fac = a.faculty_name or "Faculty"
+                    ven = a.venue_name or "Venue"
+
+                    parts.append(f"[{sec_name}] {subj}\n{fac}\n{ven}")
+
+                cell.setText("\n\n".join(parts))
+
+                # Lab coloring if ANY class is lab
+                is_lab = any(getattr(a, "is_lab", False) for a in classes)
+                cell.setBackground(QColor("#1B4332") if is_lab else QColor("#1D3557"))
+
+                self.table.setItem(r, c+1, cell)
+
+            self.table.setRowHeight(r, 115)
 
         self.table.resizeColumnsToContents()
         self.table.resizeRowsToContents()
 
-    def _cell_text_and_color(self, day, start_time):
-        """
-        Robust cell renderer:
-        - Supports assignments where `faculties` contains ORM objects OR dicts
-        - Falls back to flattened fields (subject_code, subject_name, faculty_name, venue_name)
-        - Returns readable text and a color.
-        """
-        a = next((x for x in self.assignments if getattr(x, "day", None) == day and getattr(x, "start_time", None) == start_time), None)
-        if not a:
-            return "", QColor(20, 20, 20)
+    # ---------------------------------------------------
+    # HELPERS
+    # ---------------------------------------------------
+    def _min(self, t):
+        h, m = map(int, t.split(":"))
+        return h * 60 + m
 
-        # Subject and venue may be ORM objects or missing; prefer subject fields if provided
-        subj = getattr(a, "subject", None)
-        venue = getattr(a, "venue", None)
+    def _fmt(self, m):
+        return f"{m//60:02d}:{m%60:02d}"
 
-        subj_code = getattr(a, "subject_code", None) or (getattr(subj, "code", None) if subj else "")
-        subj_name = getattr(a, "subject_name", None) or (getattr(subj, "name", None) if subj else "")
-        venue_name = getattr(a, "venue_name", None) or (getattr(venue, "name", None) if venue else "")
-
-        # faculties can be list of dicts, list of ORM objects, or absent
-        faculties_attr = getattr(a, "faculties", None)
-        faculty_names = None
-        if faculties_attr:
-            first = faculties_attr[0]
-            if isinstance(first, dict):
-                faculty_names = ", ".join([f.get("name", "N/A") for f in faculties_attr])
-            else:
-                # assume object with .name
-                faculty_names = ", ".join([getattr(f, "name", "N/A") for f in faculties_attr])
-        # fallback to single faculty object or flattened field
-        if not faculty_names:
-            single_fac = getattr(a, "faculty", None)
-            faculty_names = getattr(a, "faculty_name", None) or (getattr(single_fac, "name", None) if single_fac else "N/A")
-
-        # final safe values
-        subj_code = subj_code or ""
-        subj_name = subj_name or ""
-        faculty_names = faculty_names or "N/A"
-        venue_name = venue_name or ""
-
-        text = f"{subj_code}\n{subj_name}\n{faculty_names}\n{venue_name}"
-        is_lab = getattr(subj, "is_lab", None)
-        if is_lab is None:
-            is_lab = getattr(a, "is_lab", False)
-        color = QColor("#1B4332") if is_lab else QColor("#1D3557")
-        return text, color
-
-    # ------------------ BUTTON ACTIONS ------------------ #
+    # ---------------------------------------------------
+    # BUTTONS
+    # ---------------------------------------------------
     def _approve(self):
         if not self.assignments:
             QMessageBox.warning(self, "Warning", "No timetable to approve.")
             return
+
         if QMessageBox.question(
-            self, "Confirm", "Approve timetable?",
+            self, "Confirm", "Approve this timetable?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         ) == QMessageBox.StandardButton.Yes:
             self.meta["status"] = "approved"
@@ -236,15 +235,7 @@ class TimetableReviewTab(QWidget):
 
     def _regen(self):
         if QMessageBox.question(
-            self, "Regenerate", "Discard current timetable?",
+            self, "Regenerate", "Discard the current timetable?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         ) == QMessageBox.StandardButton.Yes:
             self.clear_timetable()
-
-    # ------------------ HELPERS ------------------ #
-    def _to_min(self, t):
-        h, m = map(int, t.split(":"))
-        return h * 60 + m
-
-    def _fmt(self, m):
-        return f"{m // 60:02d}:{m % 60:02d}"

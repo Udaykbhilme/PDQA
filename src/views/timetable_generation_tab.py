@@ -1,8 +1,3 @@
-"""
-Timetable Generation Tab — Real CP-SAT integration.
-Now uses CPSATScheduler for true constraint-based timetable generation.
-"""
-
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QLabel, QHBoxLayout, QSpinBox,
     QComboBox, QTimeEdit, QCheckBox, QGridLayout, QMessageBox, QProgressBar
@@ -11,9 +6,6 @@ from PyQt6.QtCore import pyqtSignal, QTime, QThread, pyqtSlot
 from ..scheduler.timetable_scheduler import CPSATScheduler, GenerationSettings
 
 
-# -------------------------------
-# Worker Thread for CP-SAT Solver
-# -------------------------------
 class SolverThread(QThread):
     result_ready = pyqtSignal(list, dict, list, str)
 
@@ -33,12 +25,7 @@ class SolverThread(QThread):
         self.result_ready.emit(assignments, info, conflicts, msg)
 
 
-# -------------------------------
-# Main UI Class
-# -------------------------------
 class TimetableGenerationTab(QWidget):
-    """Tab for generating timetables using CP-SAT optimization."""
-
     timetable_generated = pyqtSignal(list, dict, list)
 
     def __init__(self, db_manager):
@@ -50,24 +37,47 @@ class TimetableGenerationTab(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
 
-        # --- Config Grid ---
+        # --------------------------------------
+        # GRID: Degree, Years, Semesters, Durations
+        # --------------------------------------
         grid = QGridLayout()
 
+        # Degree
         grid.addWidget(QLabel("Degree:"), 0, 0)
         self.degree_combo = QComboBox()
         self.degree_combo.addItems(["B.Tech", "M.Tech"])
         grid.addWidget(self.degree_combo, 0, 1)
 
-        grid.addWidget(QLabel("Year:"), 0, 2)
-        self.year_combo = QComboBox()
-        self.year_combo.addItems(["2", "3", "4"])
-        grid.addWidget(self.year_combo, 0, 3)
+        # YEAR MULTI-SELECTION
+        grid.addWidget(QLabel("Years:"), 0, 2)
+        self.year_box = QComboBox()
+        self.year_box.addItems([
+            "Select",
+            "2",
+            "3",
+            "4",
+            "2,3",
+            "3,4",
+            "2,3,4"
+        ])
+        grid.addWidget(self.year_box, 0, 3)
 
-        grid.addWidget(QLabel("Semester:"), 0, 4)
-        self.semester_combo = QComboBox()
-        self.semester_combo.addItems([str(i) for i in range(3, 9)])
-        grid.addWidget(self.semester_combo, 0, 5)
+        # SEMESTER MULTI-SELECTION
+        grid.addWidget(QLabel("Semesters:"), 0, 4)
+        self.sem_box = QComboBox()
+        self.sem_box.addItems([
+            "Auto (recommended)",
+            "3", "4",
+            "5", "6",
+            "7", "8",
+            "3,4",
+            "5,6",
+            "7,8",
+            "3,4,5,6,7,8"
+        ])
+        grid.addWidget(self.sem_box, 0, 5)
 
+        # Durations
         grid.addWidget(QLabel("Lecture Duration (hrs):"), 1, 0)
         self.lecture_spin = QSpinBox()
         self.lecture_spin.setRange(1, 4)
@@ -82,7 +92,9 @@ class TimetableGenerationTab(QWidget):
 
         layout.addLayout(grid)
 
-        # --- Time and Lunch ---
+        # --------------------------------------
+        # TIME INPUTS
+        # --------------------------------------
         time_layout = QHBoxLayout()
         for label, attr, default in [
             ("Start Time", "start_time", "09:00"),
@@ -97,41 +109,79 @@ class TimetableGenerationTab(QWidget):
             time_layout.addWidget(te)
         layout.addLayout(time_layout)
 
-        # --- Days selection ---
+        # --------------------------------------
+        # DAYS
+        # --------------------------------------
         days_layout = QHBoxLayout()
         self.day_checkboxes = []
         for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
             cb = QCheckBox(d)
             cb.setChecked(d in ["Mon", "Tue", "Wed", "Thu", "Fri"])
-            days_layout.addWidget(cb)
             self.day_checkboxes.append(cb)
+            days_layout.addWidget(cb)
         layout.addLayout(days_layout)
 
-        # --- Generate + Progress ---
-        self.generate_btn = QPushButton("🚀 Generate Timetable")
+        # Generate button
+        self.generate_btn = QPushButton("Generate Timetable")
         self.generate_btn.clicked.connect(self.start_generation)
         layout.addWidget(self.generate_btn)
 
+        # Progress bar
         self.progress = QProgressBar()
-        self.progress.setRange(0, 0)
         self.progress.setVisible(False)
+        self.progress.setRange(0, 0)
         layout.addWidget(self.progress)
 
-        # --- Status ---
         self.status_label = QLabel("Ready.")
         layout.addWidget(self.status_label)
 
-    # -------------------------------
-    # Logic
-    # -------------------------------
+    # ----------------------------------------------------
+    # LAUNCH SOLVER
+    # ----------------------------------------------------
     @pyqtSlot()
     def start_generation(self):
-        """Launch CP-SAT scheduler in background."""
         self.status_label.setText("⏳ Generating timetable...")
         self.progress.setVisible(True)
         self.generate_btn.setEnabled(False)
 
+        # --------------------------------------
+        # YEARS
+        # --------------------------------------
+        year_text = self.year_box.currentText()
+        if year_text == "Select":
+            QMessageBox.warning(self, "Invalid Input", "Please select years.")
+            return
+
+        try:
+            years = [int(x.strip()) for x in year_text.split(",")]
+        except:
+            years = []
+
+        # --------------------------------------
+        # SEMESTERS
+        # --------------------------------------
+        sem_text = self.sem_box.currentText()
+
+        if sem_text.startswith("Auto"):
+            sems = []
+            for y in years:
+                if y == 2:
+                    sems.extend([3, 4])
+                elif y == 3:
+                    sems.extend([5, 6])
+                elif y == 4:
+                    sems.extend([7, 8])
+        else:
+            sems = [int(x.strip()) for x in sem_text.split(",")]
+
+        # --------------------------------------
+        # DAYS SELECTED
+        # --------------------------------------
         days = [cb.text() for cb in self.day_checkboxes if cb.isChecked()]
+
+        # --------------------------------------
+        # PACK INTO SETTINGS CLASS
+        # --------------------------------------
         settings = GenerationSettings(
             lecture_duration=self.lecture_spin.value(),
             lab_duration=self.lab_spin.value(),
@@ -141,22 +191,26 @@ class TimetableGenerationTab(QWidget):
             end_time=self.end_time.time().toString("HH:mm"),
             days=days,
             degree=self.degree_combo.currentText(),
-            year=int(self.year_combo.currentText()),
-            semester=int(self.semester_combo.currentText())
+            year=years,
+            semester=sems
         )
 
         self.worker = SolverThread(self.db, settings)
         self.worker.result_ready.connect(self._solver_finished)
         self.worker.start()
 
+    # ----------------------------------------------------
+    # AFTER SOLVER FINISHES
+    # ----------------------------------------------------
     @pyqtSlot(list, dict, list, str)
     def _solver_finished(self, assignments, info, conflicts, msg):
-        """Handle solver completion."""
         self.progress.setVisible(False)
         self.generate_btn.setEnabled(True)
         self.status_label.setText(msg)
+
         if conflicts:
             details = "\n".join(f"- {c.subject_code}: {c.details}" for c in conflicts)
             QMessageBox.warning(self, "Conflicts Detected", details)
+
         if assignments:
             self.timetable_generated.emit(assignments, info, conflicts)

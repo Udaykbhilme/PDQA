@@ -12,10 +12,9 @@ Version: 1.0.0
 import sys
 import os
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon
 
-# Add the current directory to Python path for imports
+# Add the current directory to the Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from src.views.main_window import MainWindow
@@ -24,24 +23,24 @@ from src.database.database_manager import DatabaseManager
 
 def main():
     """Main application entry point"""
-    # Create QApplication instance
+
+    # QApplication setup
     app = QApplication(sys.argv)
     app.setApplicationName("Timetable Generator")
     app.setApplicationVersion("1.0.0")
     app.setOrganizationName("CSE Department")
-    
-    # Set application style
+
     app.setStyle('Fusion')
-    
-    # Initialize database
+
+    # Initialize DB (tables are created inside __init__)
     db_manager = DatabaseManager()
-    db_manager.initialize_database()
-    
+    # NO initialize_database() needed
+
     # Create and show main window
     main_window = MainWindow()
     main_window.show()
-    
-    # Start event loop
+
+    # Event loop
     sys.exit(app.exec())
 
 

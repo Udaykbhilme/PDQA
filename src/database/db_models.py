@@ -1,113 +1,121 @@
-"""
-Database models for Timetable Generator
-Defines ORM mappings for Faculty, Subject, Venue, Section, and simple containers.
-"""
-
-from sqlalchemy import (
-    Column, Integer, String, Boolean, JSON
-)
-from sqlalchemy.orm import declarative_base
-
-Base = declarative_base()
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 
-class Faculty(Base):
-    __tablename__ = "faculties"
-
-    id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False)
-    faculty_code = Column(String, nullable=False)
-    max_hours_per_day = Column(Integer, default=6)
+# -----------------------------------------------------
+# FACULTY
+# -----------------------------------------------------
+@dataclass
+class Faculty:
+    id: int
+    name: str
+    faculty_code: str
+    max_hours_per_day: int
 
     def __repr__(self):
-        return f"<Faculty {self.name} ({self.faculty_code})>"
+        return f"<Faculty {self.id}: {self.name}>"
 
 
-class Subject(Base):
-    __tablename__ = "subjects"
-
-    id = Column(Integer, primary_key=True)
-    code = Column(String, nullable=False)
-    name = Column(String, nullable=False)
-    is_lab = Column(Boolean, default=False)
-    duration = Column(Integer, default=1)  # default hours per session (lectures usually 1)
-    year = Column(Integer, default=1)
-    semester = Column(Integer, default=1)
-    degree = Column(String, default="B.Tech")
-
-    # Optional: list of faculty IDs allowed to teach this subject (JSON array)
-    preferred_faculty_ids = Column(JSON, default=list)
+# -----------------------------------------------------
+# SUBJECT
+# -----------------------------------------------------
+@dataclass
+class Subject:
+    id: int
+    code: str
+    name: str
+    is_lab: bool
+    duration: int
+    year: int
+    semester: int
+    degree: str
+    preferred_faculty_ids: List[int] = field(default_factory=list)
 
     def __repr__(self):
-        return f"<Subject {self.code}: {self.name}>"
+        return f"<Subject {self.code} ({self.name})>"
 
 
-class Venue(Base):
-    __tablename__ = "venues"
-
-    id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False)
-    venue_type = Column(String, nullable=False)  # "lecture" or "lab"
-    capacity = Column(Integer, default=60)
-    building = Column(String, default="Main Building")
-    floor = Column(Integer, default=1)
+# -----------------------------------------------------
+# VENUE
+# -----------------------------------------------------
+@dataclass
+class Venue:
+    id: int
+    name: str
+    venue_type: str
+    capacity: int
+    building: str
+    floor: int
 
     def __repr__(self):
         return f"<Venue {self.name} ({self.venue_type})>"
 
 
-class Section(Base):
-    __tablename__ = "sections"
-
-    id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False)
-    degree = Column(String, default="B.Tech")
-    year = Column(Integer, default=1)
-    semester = Column(Integer, default=1)
-    strength = Column(Integer, default=60)
-    subsections = Column(JSON, default=list)  # e.g. ["A1", "A2", "A3"]
+# -----------------------------------------------------
+# SECTION
+# -----------------------------------------------------
+@dataclass
+class Section:
+    id: int
+    name: str
+    degree: str
+    year: int
+    semester: int
+    strength: int
+    subsections: List[str] = field(default_factory=list)
 
     def __repr__(self):
-        return f"<Section {self.name} ({self.degree})>"
+        return f"<Section {self.name} (Y{self.year} S{self.semester})>"
 
 
+# -----------------------------------------------------
+# CLASS ASSIGNMENT (CORE)
+# -----------------------------------------------------
+@dataclass
 class ClassAssignment:
-    """
-    In-memory container used by the scheduler.
-    - For lectures: `.faculty` is the Faculty object assigned.
-    - For labs: `.faculties` is a list of Faculty objects (length 1 or 2).
-    """
-    def __init__(self, subject_id, faculty_id, section_id, venue_id, subsection, day, start_time, duration):
-        self.subject_id = subject_id
-        # keep single primary faculty for backward compatibility
-        self.faculty_id = faculty_id
-        self.faculty = None             # Faculty object (primary)
-        self.faculty_ids = [faculty_id] # list of faculty ids (primary [+ secondary])
-        self.faculties = []             # list of Faculty objects (primary [+ secondary])
-        self.section_id = section_id
-        self.venue_id = venue_id
-        self.subsection = subsection
-        self.day = day
-        self.start_time = start_time
-        self.duration = duration
+    subject_id: int
+    faculty_id: int
+    section_id: int
+    venue_id: int
+    subsection: Optional[str]
+    day: str
+    start_time: str
+    duration: int
 
-        # Populated later:
-        self.subject = None
-        self.section = None
-        self.venue = None
+    # ----- Derived fields filled by scheduler -----
+    end_time: str = ""
+    subject_code: str = ""
+    subject_name: str = ""
+    faculty_name: str = ""
+    section_name: str = ""
+    venue_name: str = ""
+    is_lab: bool = False
+
+    # multiple faculty choices (for UI editing)
+    faculties: List[dict] = field(default_factory=list)
+
+    # actual object refs (optional, not required!)
+    subject: Optional[Subject] = None
+    faculty: Optional[Faculty] = None
+    section: Optional[Section] = None
+    venue: Optional[Venue] = None
 
     def __repr__(self):
-        return f"<Assignment {getattr(self.subject,'code',self.subject_id)} {self.day} {self.start_time}>"
+        return (
+            f"<ClassAssignment {self.day} {self.start_time} "
+            f"{self.subject_code} ({self.section_name})>"
+        )
 
 
+# -----------------------------------------------------
+# CONFLICT
+# -----------------------------------------------------
+@dataclass
 class Conflict:
-    """Represents a scheduling conflict during timetable generation."""
-
-    def __init__(self, conflict_type, subject_code, details, severity):
-        self.conflict_type = conflict_type
-        self.subject_code = subject_code
-        self.details = details
-        self.severity = severity
+    type: str         # venue, faculty clash, solver issue
+    subject_code: str
+    details: str
+    severity: str     # low / high / critical
 
     def __repr__(self):
-        return f"<Conflict {self.subject_code}: {self.details}>"
+        return f"<Conflict {self.type}: {self.subject_code} ({self.severity})>"
