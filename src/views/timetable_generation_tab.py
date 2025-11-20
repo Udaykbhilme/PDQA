@@ -55,10 +55,7 @@ class TimetableGenerationTab(QWidget):
             "Select",
             "2",
             "3",
-            "4",
-            "2,3",
-            "3,4",
-            "2,3,4"
+            "4"
         ])
         grid.addWidget(self.year_box, 0, 3)
 
@@ -69,11 +66,7 @@ class TimetableGenerationTab(QWidget):
             "Auto (recommended)",
             "3", "4",
             "5", "6",
-            "7", "8",
-            "3,4",
-            "5,6",
-            "7,8",
-            "3,4,5,6,7,8"
+            "7", "8"
         ])
         grid.addWidget(self.sem_box, 0, 5)
 
